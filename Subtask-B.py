@@ -1,44 +1,32 @@
 """
-Evaluation Script for Token-Level Classification Tasks
-======================================================
+Evaluation Script for Token-Level Classification Tasks (CoNLL format)
+=====================================================================
 
-This script calculates the Macro F1 score and provides a detailed classification
+This script calculates the Macro F1 score and prints a detailed classification
 report for token-level predictions (e.g., POS tagging, Named Entity Recognition)
-stored in CSV format.
+provided in CoNLL format.
 
-File Format Requirements:
--------------------------
-1. Ground Truth File (--true):
-   - Must be a CSV file.
-   - Must contain at least two columns: 'ID' and 'label'.
-   - The 'label' column should contain space-separated tokens/tags for each sequence.
-     Example row: 
-     ID,label
-     123,"B-PER I-PER O O B-LOC"
-
-2. Prediction File (--pred):
-   - Must be a CSV file.
-   - Must contain an 'ID' column to match against the ground truth.
-   - Must contain exactly *one* other column containing the predicted tags.
-     The script will automatically detect this column name.
-   - The prediction column must contain space-separated tokens/tags.
-     Example row:
-     ID,model_predictions
-     123,"B-PER O O O B-LOC"
+File Format Requirements (CoNLL):
+--------------------------------
+- Each file must be in CoNLL-style plain text where each non-empty line
+    contains at least two whitespace-separated columns: a token and its tag.
+    The tag is expected to be the last column on the line. Sentences are
+    separated by blank lines.
+- The ground-truth file (--true) contains the reference tags.
+- The prediction file (--pred) contains predicted tags for the same token
+    segmentation (one tag per token), in the same sentence order.
 
 Important Features & Constraints:
 ---------------------------------
-- Inner Join Alignment: The script merges both files on the 'ID' column. If the 
-  prediction file is missing IDs present in the ground truth, a warning is printed.
-- Token-Count Verification: For every matched ID, the number of space-separated 
-  tokens in the ground truth MUST exactly match the number of tokens in the 
-  prediction. If a mismatch is found (e.g., row 123 has 5 true tags but 4 predicted 
-  tags), the script will raise a ValueError and halt.
-- Missing/Null Data Handling: Empty fields or NaNs are automatically treated as 
-  empty strings to prevent common pandas string-parsing bugs (like reading empty 
-  rows as the string "nan").
-- Optimized Processing: Uses vectorized pandas string actions to flatten arrays 
-  efficiently, offering high performance even on large datasets.
+- Sentence alignment: The script groups tags into sentences (blocks separated
+    by blank lines) and assigns incremental sentence IDs starting from 0. The
+    prediction and ground-truth files are aligned by these sentence IDs.
+- Token-Count Verification: For every matched sentence ID, the number of tokens
+    (i.e., tags) in the ground truth MUST exactly match the number in the
+    prediction. A mismatch raises a ValueError and halts.
+- Missing/Null Data Handling: Empty tags are treated as empty strings.
+- Optimized Processing: Uses pandas vectorized string actions to flatten lists
+    efficiently for metric computation.
 """
 
 import argparse
@@ -47,31 +35,14 @@ from sklearn.metrics import classification_report, f1_score
 
 
 def evaluate_macro_f1(pred_file, true_file):
-    # Read files
-    pred_df = pd.read_csv(pred_file)
-    true_df = pd.read_csv(true_file)
+    # Read CoNLL files into DataFrames with sentence IDs and space-joined tags
+    pred_df = read_conll_to_df(pred_file, col_name="pred")
+    true_df = read_conll_to_df(true_file, col_name="label")
 
-    # Validate required columns
-    if "ID" not in pred_df.columns:
-        raise ValueError("Prediction file must contain an 'ID' column.")
-
-    if "ID" not in true_df.columns or "label" not in true_df.columns:
-        raise ValueError(
-            "Ground truth file must contain 'ID' and 'label' columns."
-        )
-
-    # Find prediction column automatically
-    pred_cols = [c for c in pred_df.columns if c != "ID"]
-    if len(pred_cols) != 1:
-        raise ValueError(
-            f"Prediction file should contain exactly one prediction column besides ID. Found: {pred_cols}"
-        )
-    pred_col = pred_cols[0]
+    pred_col = "pred"
 
     # Merge on ID
-    merged = true_df.merge(
-        pred_df[["ID", pred_col]], on="ID", how="inner"
-    )
+    merged = true_df.merge(pred_df[["ID", pred_col]], on="ID", how="inner")
 
     if len(merged) != len(true_df):
         print(
@@ -115,11 +86,44 @@ def evaluate_macro_f1(pred_file, true_file):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--pred", required=True, help="Prediction CSV"
+        "--pred", required=True, help="Prediction CoNLL file"
     )
     parser.add_argument(
-        "--true", required=True, help="Ground truth CSV"
+        "--true", required=True, help="Ground truth CoNLL file"
     )
 
     args = parser.parse_args()
     evaluate_macro_f1(pred_file=args.pred, true_file=args.true)
+
+
+def read_conll_to_df(path, col_name="label"):
+    """Read a CoNLL-style file and return a DataFrame with columns `ID` and
+    `col_name` where each row corresponds to one sentence and the tags are a
+    space-joined string of the sentence tags.
+
+    The function expects the tag to be the last whitespace-separated column
+    on each non-empty line. Sentences are separated by blank lines.
+    """
+    sentences = []
+    curr_tags = []
+    with open(path, "r", encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.rstrip("\n")
+            if not line.strip():
+                if curr_tags:
+                    sentences.append(" ".join(curr_tags))
+                    curr_tags = []
+                continue
+            parts = line.split()
+            # Take last column as tag; if line malformed, treat tag as empty
+            tag = parts[-1] if len(parts) >= 1 else ""
+            curr_tags.append(tag)
+        # append last sentence if file doesn't end with a blank line
+        if curr_tags:
+            sentences.append(" ".join(curr_tags))
+
+    df = pd.DataFrame({
+        "ID": list(range(len(sentences))),
+        col_name: sentences,
+    })
+    return df
