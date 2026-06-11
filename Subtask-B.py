@@ -3,27 +3,24 @@ Evaluation Script for Token-Level Classification Tasks (CoNLL format)
 =====================================================================
 
 This script calculates the Macro F1 score and prints a detailed classification
-report for token-level predictions (e.g., POS tagging, Named Entity Recognition)
-provided in CoNLL format.
+report for token-level predictions (e.g., language identification at token level).
 
-File Format Requirements (CoNLL):
---------------------------------
+File Format Requirements:
+-----------------------
 - Each file must be in CoNLL-style plain text where each non-empty line
-    contains at least two whitespace-separated columns: a token and its tag.
-    The tag is expected to be the last column on the line. Sentences are
-    separated by blank lines.
-- The ground-truth file (--true) contains the reference tags.
-- The prediction file (--pred) contains predicted tags for the same token
+    contains two tab-separated columns: a token and its language tag.
+- Sentences are separated by blank lines.
+- The ground-truth file (--true) contains the reference language tags.
+- The prediction file (--pred) contains predicted language tags for the same token
     segmentation (one tag per token), in the same sentence order.
 
 Important Features & Constraints:
 ---------------------------------
 - Sentence alignment: The script groups tags into sentences (blocks separated
-    by blank lines) and assigns incremental sentence IDs starting from 0. The
-    prediction and ground-truth files are aligned by these sentence IDs.
-- Token-Count Verification: For every matched sentence ID, the number of tokens
-    (i.e., tags) in the ground truth MUST exactly match the number in the
-    prediction. A mismatch raises a ValueError and halts.
+    by blank lines). Sentences are aligned by their position in the files.
+- Token-Count Verification: For every sentence, the number of tokens in the 
+    ground truth MUST exactly match the number in the prediction. A mismatch 
+    raises a ValueError and halts.
 - Missing/Null Data Handling: Empty tags are treated as empty strings.
 - Optimized Processing: Uses pandas vectorized string actions to flatten lists
     efficiently for metric computation.
@@ -35,43 +32,28 @@ from sklearn.metrics import classification_report, f1_score
 
 
 def evaluate_macro_f1(pred_file, true_file):
-    # Read CoNLL files into DataFrames with sentence IDs and space-joined tags
-    pred_df = read_conll_to_df(pred_file, col_name="pred")
-    true_df = read_conll_to_df(true_file, col_name="label")
+    # Read CoNLL files into DataFrames with sentence tags
+    pred_sentences = read_conll_sentences(pred_file)
+    true_sentences = read_conll_sentences(true_file)
 
-    pred_col = "pred"
-
-    # Merge on ID
-    merged = true_df.merge(pred_df[["ID", pred_col]], on="ID", how="inner")
-
-    if len(merged) != len(true_df):
-        print(
-            f"Warning: matched {len(merged)} of {len(true_df)} ground-truth rows."
-        )
-
-    # Fill NaN values with empty strings to prevent "nan" token bugs
-    merged["label"] = merged["label"].fillna("").astype(str)
-    merged[pred_col] = merged[pred_col].fillna("").astype(str)
-
-    # Vectorized splitting
-    true_lists = merged["label"].str.split()
-    pred_lists = merged[pred_col].str.split()
-
-    # Fast verification of token counts per row
-    lengths_match = true_lists.str.len() == pred_lists.str.len()
-    if not lengths_match.all():
-        # Find the first offending row to show in the error
-        failed_row = merged[~lengths_match].iloc[0]
-        t_len = len(true_lists.loc[failed_row.name])
-        p_len = len(pred_lists.loc[failed_row.name])
+    # Verify sentence counts match
+    if len(pred_sentences) != len(true_sentences):
         raise ValueError(
-            f"Token count mismatch for ID={failed_row['ID']} "
-            f"(true={t_len}, pred={p_len})"
+            f"Sentence count mismatch: predicted={len(pred_sentences)}, "
+            f"ground-truth={len(true_sentences)}"
         )
 
-    # Flatten the series of lists into single lists
-    y_true = [token for sublist in true_lists for token in sublist]
-    y_pred = [token for sublist in pred_lists for token in sublist]
+    # Verify token counts match for each sentence
+    for sent_id, (true_tags, pred_tags) in enumerate(zip(true_sentences, pred_sentences)):
+        if len(true_tags) != len(pred_tags):
+            raise ValueError(
+                f"Token count mismatch for sentence {sent_id} "
+                f"(true={len(true_tags)}, pred={len(pred_tags)})"
+            )
+
+    # Flatten all tags across all sentences
+    y_true = [tag for sentence_tags in true_sentences for tag in sentence_tags]
+    y_pred = [tag for sentence_tags in pred_sentences for tag in sentence_tags]
 
     # Calculate metrics
     macro_f1 = f1_score(y_true, y_pred, average="macro")
@@ -96,34 +78,31 @@ if __name__ == "__main__":
     evaluate_macro_f1(pred_file=args.pred, true_file=args.true)
 
 
-def read_conll_to_df(path, col_name="label"):
-    """Read a CoNLL-style file and return a DataFrame with columns `ID` and
-    `col_name` where each row corresponds to one sentence and the tags are a
-    space-joined string of the sentence tags.
+def read_conll_sentences(path):
+    """Read a CoNLL-style file and return a list of sentences, where each 
+    sentence is a list of language tags.
 
-    The function expects the tag to be the last whitespace-separated column
-    on each non-empty line. Sentences are separated by blank lines.
+    The function expects each non-empty line to have format: word\tlanguage
+    where the language tag is the second tab-separated column.
+    Sentences are separated by blank lines.
     """
     sentences = []
     curr_tags = []
+    
     with open(path, "r", encoding="utf-8") as fh:
         for raw in fh:
             line = raw.rstrip("\n")
             if not line.strip():
                 if curr_tags:
-                    sentences.append(" ".join(curr_tags))
+                    sentences.append(curr_tags)
                     curr_tags = []
                 continue
-            parts = line.split()
-            # Take last column as tag; if line malformed, treat tag as empty
-            tag = parts[-1] if len(parts) >= 1 else ""
+            parts = line.split("\t")
+            # Extract language tag (second column)
+            tag = parts[1] if len(parts) >= 2 else ""
             curr_tags.append(tag)
         # append last sentence if file doesn't end with a blank line
         if curr_tags:
-            sentences.append(" ".join(curr_tags))
+            sentences.append(curr_tags)
 
-    df = pd.DataFrame({
-        "ID": list(range(len(sentences))),
-        col_name: sentences,
-    })
-    return df
+    return sentences
